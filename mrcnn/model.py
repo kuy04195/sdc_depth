@@ -1223,56 +1223,6 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     semantic = utils.resize_mask(semantic, scale, padding, crop)
     depth = utils.resize_mask(depth[..., np.newaxis], scale, padding, crop)
 
-    # Random horizontal flips.
-    # TODO: will be removed in a future update in favor of augmentation
-    if augment:
-        logging.warning("'augment' is deprecated. Use 'augmentation' instead.")
-        if random.randint(0, 1):
-            image = np.fliplr(image)
-            mask = np.fliplr(mask)
-            semantic = np.fliplr(semantic)
-            depth = np.fliplr(depth)
-
-    # Augmentation
-    # This requires the imgaug lib (https://github.com/aleju/imgaug)
-    if augmentation:
-        import imgaug
-
-        # Augmenters that are safe to apply to masks
-        # Some, such as Affine, have settings that make them unsafe, so always
-        # test your augmentation on masks
-        MASK_AUGMENTERS = ["Sequential", "SomeOf", "OneOf", "Sometimes",
-                           "Fliplr", "Flipud", "CropAndPad",
-                           "Affine", "PiecewiseAffine"]
-
-        def hook(images, augmenter, parents, default):
-            """Determines which augmenters to apply to masks."""
-            return augmenter.__class__.__name__ in MASK_AUGMENTERS
-
-        # Store shapes before augmentation to compare
-        image_shape = image.shape
-        mask_shape = mask.shape
-        semantic_shape = semantic.shape
-        depth_shape = depth.shape
-        # Make augmenters deterministic to apply similarly to images and masks
-        det = augmentation.to_deterministic()
-        image = det.augment_image(image)
-        # Change mask to np.uint8 because imgaug doesn't support np.bool
-        mask = det.augment_image(mask.astype(np.uint8),
-                                 hooks=imgaug.HooksImages(activator=hook))
-        semantic = det.augment_image(semantic.astype(np.uint8),
-                                 hooks=imgaug.HooksImages(activator=hook))
-        depth = det.augment_image(depth.astype(np.float32),
-                                 hooks=imgaug.HooksImages(activator=hook))
-        # Verify that shapes didn't change
-        assert image.shape == image_shape, "Augmentation shouldn't change image size"
-        assert mask.shape == mask_shape, "Augmentation shouldn't change mask size"
-        assert semantic.shape == semantic_shape, "Augmentation shouldn't change semantic size"
-        assert depth.shape == depth_shape, "Augmentation shouldn't change depth size"
-        # Change mask back to bool
-        mask = mask.astype(np.bool)
-        semantic = semantic.astype(np.bool)
-
     # Note that some boxes might be all zeros if the corresponding mask got cropped out.
     # and here is to filter them out
     _idx = np.sum(mask, axis=(0, 1)) > 0
@@ -1292,25 +1242,13 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
 
     # TODO : back ground mask is set to ZEROS, which is not True!
     # Check image.shape is same with config.IMAGE_SHAPE
-    """semantic = [np.zeros(config.IMAGE_SHAPE[0:2])]
-    for index in range(1, config.NUM_CLASSES):
-        _idx = class_ids == index
-        
-        if(not np.any(_idx)):
-            _masks = np.zeros(config.IMAGE_SHAPE[0:2])
-        else:
-            _masks = mask[:, :, _idx]
-            _masks = np.logical_or.reduce(_masks, axis=2)
-            _masks = np.squeeze(_masks)
-        semantic.append(_masks)
-
-    semantic = np.stack(semantic, axis=2)"""
     semantic = utils.minimize_mask(
         np.tile(np.array([0, 0, config.IMAGE_SHAPE[0], config.IMAGE_SHAPE[1]])[np.newaxis, :], (config.NUM_CLASSES, 1)),
         semantic, config.SEMANTIC_MASK_SHAPE)
-    depth = utils.minimize_mask(
+    """depth = utils.minimize_mask(
         np.array([0, 0, config.IMAGE_SHAPE[0], config.IMAGE_SHAPE[1]])[np.newaxis, :],
-        depth, config.SEMANTIC_DEPTH_SHAPE)
+        depth, config.SEMANTIC_DEPTH_SHAPE)"""
+    depth = utils.resize(depth, config.SEMANTIC_DEPTH_SHAPE)
     depth = np.squeeze(depth)
 
     # Resize masks to smaller size to reduce memory usage
@@ -2087,18 +2025,27 @@ def aggregator(sem_depth, ins_depth, rois, mrcnn_mask, mrcnn_class, num_classes,
 
         _bbox = tf.transpose(bbox, [1, 0])
         area = tf.cast((_bbox[3] - _bbox[1])*256, tf.int32) * tf.cast((_bbox[2] - _bbox[0]) * 256, tf.int32)
-        idx = tf.nn.top_k(area, k=MAX_INSTANCE, sorted=True)[1]
-
         num_keep = tf.reduce_sum(tf.cast(tf.not_equal(area, 0), tf.float32))
         num_keep = tf.minimum(tf.cast(num_keep, tf.int32), MAX_INSTANCE)
-        gap_delta = tf.minimum(num_ins, MAX_INSTANCE) - num_keep
+        idx_bbox = tf.nn.top_k(area, k=MAX_INSTANCE, sorted=True)[1]
+        idx_bbox = idx_bbox[:num_keep]
+        
+        idx = tf.nn.top_k(ins_prob, k=MAX_INSTANCE, sorted=True)[1]
+        idx = tf.sets.set_intersection(tf.expand_dims(idx, 0), tf.expand_dims(idx_bbox, 0))
+        idx = tf.sparse_tensor_to_dense(idx)[0]
+
+        num_idx = tf.shape(idx)[0]
+        gap = tf.maximum(MAX_INSTANCE - num_idx, 0)
 
         ins_dep     = tf.gather(ins_dep,    idx, axis=0)
         ins_mask    = tf.gather(ins_mask,   idx, axis=0)
         ins_prob    = tf.gather(ins_prob,   idx, axis=0)
         bbox        = tf.gather(bbox,       idx, axis=0)
 
-        bbox = tf.concat([bbox[:num_keep], tf.tile([[0.01, 0.01, 0.02, 0.02]], [gap + gap_delta, 1])], axis=0)
+        ins_mask    = tf.pad(ins_mask,  [(0, gap), (0, 0), (0, 0), (0, 0)], 'CONSTANT')
+        ins_dep     = tf.pad(ins_dep,   [(0, gap), (0, 0), (0, 0), (0, 0)], 'CONSTANT')
+        ins_prob    = tf.pad(ins_prob,  [(0, gap)])
+        bbox        = tf.concat([bbox, tf.tile([[0.01, 0.01, 0.02, 0.02]], [gap, 1])], axis=0)
 
         target_aggregated_depth = tf.zeros_like(sem_depth[:, :, cid])
         target_nor_mask         = tf.ones_like(target_aggregated_depth)
@@ -2198,13 +2145,18 @@ class AggregationLayer(KE.Layer):
         return (None,) + self.config.SEMANTIC_MASK_SHAPE
  
 def depth_loss_graph(depth_map, gt_depth):
-    valid_mask = tf.cast(tf.not_equal(gt_depth, 0.), tf.float32)
-    
+    gt_depth_shape = tf.shape(gt_depth)
+    valid_mask = tf.cast(tf.not_equal(gt_depth, 0), tf.float32)
+    valid_weigth = gt_depth[1] * gt_depth[2] / tf.reduce_sum(valid_mask)
+    #valid_mask = tf.Print(valid_mask, [tf.reduce_sum(valid_mask), tf.shape(valid_mask)], "\nvalid_mask :")
+
     depth_map = tf.multiply(depth_map, valid_mask)
     gt_depth = tf.multiply(gt_depth, valid_mask)
+    #depth_map = tf.Print(depth_map, [tf.reduce_mean(depth_map)*2], "depth_map :")
+    #gt_depth = tf.Print(gt_depth, [tf.reduce_mean(gt_depth)*2], "gt_depth :")
 
     loss = K.abs(gt_depth - depth_map)
-    loss = K.mean(loss)
+    loss = K.mean(loss) * valid_weigth
 
     return loss
 
