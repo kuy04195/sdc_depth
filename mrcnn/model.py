@@ -2147,7 +2147,7 @@ class AggregationLayer(KE.Layer):
 def depth_loss_graph(depth_map, gt_depth):
     gt_depth_shape = tf.shape(gt_depth)
     valid_mask = tf.cast(tf.not_equal(gt_depth, 0), tf.float32)
-    valid_weigth = gt_depth[1] * gt_depth[2] / tf.reduce_sum(valid_mask)
+    valid_weigth = 256 * 256 / tf.reduce_sum(valid_mask)
     #valid_mask = tf.Print(valid_mask, [tf.reduce_sum(valid_mask), tf.shape(valid_mask)], "\nvalid_mask :")
 
     depth_map = tf.multiply(depth_map, valid_mask)
