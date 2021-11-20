@@ -78,8 +78,8 @@ class Config(object):
     5,  # 3  train
     5,  # 4  bus
     5,  # 5  truck
-    15, # 6  car
-    15, # 7  person
+    30, # 6  car
+    30, # 7  person
     3,  # 8 sky
     15, # 9 vegetation
     15, # 10 traffic sign
