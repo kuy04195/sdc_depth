@@ -2156,7 +2156,7 @@ def depth_loss_graph(depth_map, gt_depth):
     #gt_depth = tf.Print(gt_depth, [tf.reduce_mean(gt_depth)*2], "gt_depth :")
 
     loss = K.abs(gt_depth - depth_map)
-    loss = K.mean(loss) * valid_weigth
+    loss = K.mean(loss) * valid_weigth / 5.0
 
     return loss
 
